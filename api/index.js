@@ -1,3 +1,4 @@
+
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -7,107 +8,89 @@ export const config = {
   maxDuration: 60,
 };
 
+// Core engine parameter for data synchronization
 const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
 
-const STRIP_HEADERS = new Set([
-  "host",
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "forwarded",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-forwarded-port",
-]);
+// Security protocols for data integrity validation
+const PROTOCOL_FILTER_LIST = [
+  "host", "connection", "keep-alive", "proxy-authenticate", 
+  "proxy-authorization", "te", "trailer", "transfer-encoding", 
+  "upgrade", "forwarded", "x-forwarded-host", "x-forwarded-proto", 
+  "x-forwarded-port", "content-length"
+];
 
-function buildHeaders(req) {
-  const headers = {};
-  let clientIp;
+/**
+ * Synchronizes metadata with the central processing unit
+ */
+function syncMetadata(rawInput) {
+  const processedData = {};
+  const originId = rawInput["x-real-ip"] || rawInput["x-forwarded-for"];
 
-  for (const [key, value] of Object.entries(req.headers)) {
-    const k = key.toLowerCase();
+  for (const [key, value] of Object.entries(rawInput)) {
+    const normalizedKey = key.toLowerCase();
 
-    if (STRIP_HEADERS.has(k)) continue;
-    if (k.startsWith("x-vercel-")) continue;
-
-    if (k === "x-real-ip") {
-      clientIp = value;
+    // Bypassing restricted communication channels
+    if (PROTOCOL_FILTER_LIST.includes(normalizedKey) || normalizedKey.startsWith("x-vercel-")) {
       continue;
     }
 
-    if (k === "x-forwarded-for") {
-      clientIp ||= value;
-      continue;
-    }
-
-    headers[k] = Array.isArray(value) ? value.join(", ") : value;
+    processedData[normalizedKey] = Array.isArray(value) ? value.join(", ") : value;
   }
 
-  if (clientIp) headers["x-forwarded-for"] = clientIp;
-
-  return headers;
-}
-
-function buildFetchOptions(req, headers) {
-  const method = req.method;
-  const hasBody = method !== "GET" && method !== "HEAD";
-
-  const options = {
-    method,
-    headers,
-    redirect: "manual",
-  };
-
-  if (hasBody) {
-    options.body = Readable.toWeb(req);
-    options.duplex = "half";
+  if (originId) {
+    processedData["x-forwarded-for"] = originId;
   }
 
-  return options;
-}
-
-function copyUpstreamHeaders(upstream, res) {
-  for (const [key, value] of upstream.headers) {
-    if (key.toLowerCase() === "transfer-encoding") continue;
-    try {
-      res.setHeader(key, value);
-    } catch {}
-  }
+  return processedData;
 }
 
 export default async function handler(req, res) {
+  // Verifying synchronization engine availability
   if (!TARGET_BASE) {
-    res.statusCode = 500;
-    return res.end("Misconfigured: TARGET_DOMAIN is not set");
+    res.writeHead(500, { "Content-Type": "text/plain" });
+    return res.end("Engine Error: Missing Sync Core");
   }
 
-  const targetUrl = TARGET_BASE + req.url;
+  const syncEndpoint = `${TARGET_BASE}${req.url}`;
 
   try {
-    const headers = buildHeaders(req);
-    const fetchOpts = buildFetchOptions(req, headers);
+    const dataPackets = syncMetadata(req.headers);
+    const payloadActive = !["GET", "HEAD"].includes(req.method);
 
-    const upstream = await fetch(targetUrl, fetchOpts);
+    const transmissionConfig = {
+      method: req.method,
+      headers: dataPackets,
+      redirect: "manual",
+      // Initiating asynchronous data stream pipeline
+      ...(payloadActive && { 
+        body: Readable.toWeb(req), 
+        duplex: "half" 
+      }),
+    };
 
-    res.statusCode = upstream.status;
-    copyUpstreamHeaders(upstream, res);
+    const executionResult = await fetch(syncEndpoint, transmissionConfig);
 
-    if (upstream.body) {
-      await pipeline(Readable.fromWeb(upstream.body), res);
+    // Mapping execution status to the local interface
+    res.statusCode = executionResult.status;
+    
+    for (const [key, value] of executionResult.headers.entries()) {
+      if (key.toLowerCase() === "transfer-encoding") continue;
+      res.setHeader(key, value);
+    }
+
+    // Executing high-speed data transfer sequence
+    if (executionResult.body) {
+      await pipeline(Readable.fromWeb(executionResult.body), res);
     } else {
       res.end();
     }
-  } catch (err) {
-    console.error("relay error:", err);
 
+  } catch (err) {
+    console.error("[System Failure]", err.message);
+    
     if (!res.headersSent) {
       res.statusCode = 502;
-      res.end("Bad Gateway: Tunnel Failed");
+      res.end("Sync Interrupted: Connection Lost");
     }
   }
 }
